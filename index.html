@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>漫画原稿進捗管理 - 統合ダッシュボード</title>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Kaisei+Tokumin:wght@400;700&family=DotGothic16&family=Noto+Sans+JP:wght@300;400;500;700&family=Inter:wght@400;500;600&display=swap');
 
@@ -179,6 +180,13 @@
   .modal-content { background:var(--surface); border-radius:12px; width:90%; max-width:500px; padding:24px; position:relative; box-shadow: 0 10px 40px rgba(0,0,0,0.1);}
   .modal-close { position:absolute; top:16px; right:16px; background:none; border:none; font-size:20px; cursor:pointer; color:var(--text-dim);}
   
+  /* DRIVE SYNC */
+  .drive-btn { background: var(--surface); border: 1px solid var(--border); color: var(--text-main); padding: 8px 14px; border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer; transition: 0.2s; box-shadow: 0 4px 12px var(--shadow); }
+  .drive-btn:hover { border-color: var(--primary); color: var(--primary-dark); transform: translateY(-2px); }
+  .drive-btn.signed-in { border-color: var(--primary); color: var(--primary-dark); background: #f0faf6; }
+  .sync-toast { position:fixed; bottom:70px; right:20px; padding:10px 16px; background:var(--surface); border-left:4px solid var(--primary); box-shadow:0 4px 12px var(--shadow); border-radius:4px; font-size:12px; font-weight:bold; color:var(--primary-dark); z-index:500; animation:slideIn 0.5s ease; }
+  .sync-toast.error { border-left-color: var(--danger); color: var(--danger); }
+
   .login-bonus { position:fixed; bottom:20px; right:20px; padding:12px 20px; background:var(--surface); border-left:4px solid var(--primary); box-shadow:0 4px 12px var(--shadow); border-radius:4px; font-size:12px; font-weight:bold; color:var(--primary-dark); z-index:500; animation:slideIn 0.5s ease; }
   @keyframes slideIn { from{transform:translateX(100%)} to{transform:translateX(0)} }
   
@@ -260,6 +268,7 @@
     </div>
     <div class="header-actions">
       <button class="header-btn" onclick="toggleSound()" id="soundBtn">🔉 音ON</button>
+      <button class="drive-btn" id="driveBtn" onclick="handleDriveAuth()">☁️ Googleでログイン</button>
       <button class="header-btn" onclick="openModal('dataModal')">💾 データ管理</button>
       <button class="header-btn" onclick="openModal('journeyModal'); renderJourney()">📖 旅の記録</button>
       <button class="header-btn" onclick="openModal('worldModal'); renderWorldList()">🌍 ワールド</button>
@@ -465,8 +474,159 @@ function loadState() {
 }
 
 let state = loadState();
-function saveState() { localStorage.setItem('manga_v3', JSON.stringify(state)); }
+function saveState() {
+  localStorage.setItem('manga_v3', JSON.stringify(state));
+  // Drive同期（ログイン済みの場合のみ、500ms debounce）
+  if (driveAccessToken) {
+    clearTimeout(saveState._timer);
+    saveState._timer = setTimeout(() => saveToDrive(), 500);
+  }
+}
 function getCurrentWorld() { return state.worlds.find(w => w.id === state.currentWorldId) || state.worlds[0]; }
+
+// --- GOOGLE DRIVE SYNC ---
+const DRIVE_CLIENT_ID = '445090532641-jmr9dvg33e714c53d2nmu4eskasm1kdl.apps.googleusercontent.com';
+const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
+const DRIVE_FILENAME = 'manga_progress_v3.json';
+let driveAccessToken = null;
+let driveFileId = null;
+let tokenClient = null;
+
+function initDriveClient() {
+  tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: DRIVE_CLIENT_ID,
+    scope: DRIVE_SCOPE,
+    callback: async (resp) => {
+      if (resp.error) { showSyncToast('Googleログイン失敗', true); return; }
+      driveAccessToken = resp.access_token;
+      updateDriveBtn(true);
+      showSyncToast('Googleにログインしました');
+      await loadFromDrive();
+    }
+  });
+}
+
+function handleDriveAuth() {
+  if (driveAccessToken) {
+    // ログアウト
+    google.accounts.oauth2.revoke(driveAccessToken, () => {});
+    driveAccessToken = null;
+    driveFileId = null;
+    updateDriveBtn(false);
+    showSyncToast('ログアウトしました');
+  } else {
+    tokenClient.requestAccessToken({ prompt: 'consent' });
+  }
+}
+
+function updateDriveBtn(signedIn) {
+  const btn = document.getElementById('driveBtn');
+  if (signedIn) {
+    btn.textContent = '☁️ 同期中';
+    btn.classList.add('signed-in');
+  } else {
+    btn.textContent = '☁️ Googleでログイン';
+    btn.classList.remove('signed-in');
+  }
+}
+
+async function driveRequest(url, method, body) {
+  const opts = {
+    method,
+    headers: { Authorization: 'Bearer ' + driveAccessToken }
+  };
+  if (body) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = typeof body === 'string' ? body : JSON.stringify(body);
+  }
+  const res = await fetch(url, opts);
+  if (!res.ok) throw new Error('Drive API error: ' + res.status);
+  return res.json();
+}
+
+async function findDriveFile() {
+  const res = await driveRequest(
+    'https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=name%3D%22' + DRIVE_FILENAME + '%22&fields=files(id)',
+    'GET'
+  );
+  return res.files && res.files.length > 0 ? res.files[0].id : null;
+}
+
+async function loadFromDrive() {
+  try {
+    driveFileId = await findDriveFile();
+    if (!driveFileId) {
+      // Driveにファイルなし → 現在のlocalStorageデータをDriveへ保存
+      await saveToDrive();
+      showSyncToast('Drive初回バックアップ完了');
+      return;
+    }
+    const res = await fetch(
+      'https://www.googleapis.com/drive/v3/files/' + driveFileId + '?alt=media',
+      { headers: { Authorization: 'Bearer ' + driveAccessToken } }
+    );
+    if (!res.ok) throw new Error('読み込み失敗');
+    const driveData = await res.json();
+
+    // タイムスタンプ比較（driveデータが新しければ上書き）
+    const localTs = state._savedAt || 0;
+    const driveTs = driveData._savedAt || 0;
+    if (driveTs > localTs) {
+      if (confirm('Driveに新しいデータがあります。Driveのデータで更新しますか？\n（キャンセルするとこのデバイスのデータを使います）')) {
+        state = driveData;
+        saveState();
+        location.reload();
+        return;
+      }
+    }
+    showSyncToast('Drive同期済み');
+  } catch(e) {
+    showSyncToast('Drive読み込みエラー', true);
+    console.error(e);
+  }
+}
+
+async function saveToDrive() {
+  if (!driveAccessToken) return;
+  try {
+    state._savedAt = Date.now();
+    localStorage.setItem('manga_v3', JSON.stringify(state));
+    const content = JSON.stringify(state);
+    const boundary = 'manga_drive_boundary';
+
+    if (!driveFileId) driveFileId = await findDriveFile();
+
+    if (driveFileId) {
+      // 既存ファイルを更新
+      await fetch(
+        'https://www.googleapis.com/upload/drive/v3/files/' + driveFileId + '?uploadType=media',
+        { method: 'PATCH', headers: { Authorization: 'Bearer ' + driveAccessToken, 'Content-Type': 'application/json' }, body: content }
+      );
+    } else {
+      // 新規作成（multipart）
+      const meta = JSON.stringify({ name: DRIVE_FILENAME, parents: ['appDataFolder'] });
+      const body = `--${boundary}\r\nContent-Type: application/json\r\n\r\n${meta}\r\n--${boundary}\r\nContent-Type: application/json\r\n\r\n${content}\r\n--${boundary}--`;
+      const res = await fetch(
+        'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id',
+        { method: 'POST', headers: { Authorization: 'Bearer ' + driveAccessToken, 'Content-Type': `multipart/related; boundary=${boundary}` }, body }
+      );
+      const data = await res.json();
+      driveFileId = data.id;
+    }
+  } catch(e) {
+    console.error('Drive保存エラー:', e);
+  }
+}
+
+function showSyncToast(msg, isError = false) {
+  const existing = document.querySelector('.sync-toast');
+  if (existing) existing.remove();
+  const el = document.createElement('div');
+  el.className = 'sync-toast' + (isError ? ' error' : '');
+  el.textContent = (isError ? '⚠️ ' : '☁️ ') + msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3500);
+}
 
 // --- CORE APP LOGIC ---
 const today = new Date(); today.setHours(0,0,0,0);
@@ -479,6 +639,13 @@ function init() {
   renderStatus();
   renderLog();
   checkLoginBonus();
+  // GISライブラリ読み込み後にDriveクライアント初期化
+  const waitGIS = setInterval(() => {
+    if (window.google && google.accounts) {
+      clearInterval(waitGIS);
+      initDriveClient();
+    }
+  }, 200);
 }
 
 function updateSoundBtn() { document.getElementById('soundBtn').textContent = state.soundEnabled ? '🔉 音ON' : '🔇 ミュート'; }
