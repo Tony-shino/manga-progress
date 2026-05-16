@@ -357,6 +357,16 @@
 
     <!-- CENTER COL: Deadlines -->
     <div class="col">
+      <!-- Schedule -->
+      <div class="card">
+        <div class="card-header" onclick="toggleCard(this)">
+          <div class="card-title">📝 工程スケジュール</div><button class="toggle-btn">▼</button>
+        </div>
+        <div class="card-body" id="scheduleView">
+          <!-- JS generated -->
+        </div>
+      </div>
+
       <!-- Calendar -->
       <div class="card">
         <div class="card-header" onclick="toggleCard(this)">
@@ -824,6 +834,97 @@ window.runAutoCalc = function() {
   const pct = Math.min(100, totWeight > 0 ? (curWeight / totWeight) * 100 : 0);
   document.getElementById('progPct').textContent = `${pct.toFixed(1)}%`;
   document.getElementById('progFill').style.width = `${pct}%`;
+
+  renderSchedule();
+}
+
+function renderSchedule() {
+  const cw = getCurrentWorld();
+  const excludeWeekends = document.getElementById('excludeWeekends').checked;
+  const tarD = new Date(cw.targetDate); tarD.setHours(0,0,0,0);
+  
+  const scheduleEl = document.getElementById('scheduleView');
+  
+  if(!cw.targetDate || tarD < today) {
+    scheduleEl.innerHTML = '<div style="font-size:12px; color:var(--text-dim); text-align:center;">期限が設定されていないか、過ぎています。</div>';
+    return;
+  }
+  
+  let validDates = [];
+  let tempD = new Date(today);
+  tempD.setHours(0,0,0,0);
+  
+  while(tempD <= tarD) {
+    if (!excludeWeekends || (tempD.getDay() !== 0 && tempD.getDay() !== 6)) {
+      validDates.push(new Date(tempD));
+    }
+    tempD.setDate(tempD.getDate()+1);
+  }
+  
+  if (validDates.length === 0) validDates.push(new Date(today));
+  
+  const stagesData = [
+    { key: 'name', label: 'ネーム', weight: 0.25, color: 'var(--name)' },
+    { key: 'draft', label: '下書き', weight: 1, color: 'var(--draft)' },
+    { key: 'pen', label: 'ペン入れ', weight: 1, color: 'var(--pen)' },
+    { key: 'finish', label: '仕上げ', weight: 0.5, color: 'var(--finish)' }
+  ];
+  
+  let remTotalWt = 0;
+  stagesData.forEach(st => {
+    st.remPages = cw.totalPages - cw.pages.filter(p => p[st.key]).length;
+    st.remWt = st.remPages * st.weight;
+    remTotalWt += st.remWt;
+  });
+  
+  if (remTotalWt === 0) {
+    scheduleEl.innerHTML = '<div style="font-size:12px; color:var(--text-dim); text-align:center;">全工程完了！</div>';
+    return;
+  }
+  
+  let html = '<ul style="list-style:none; padding:0; margin:0; font-size:12px;">';
+  
+  let currentIdx = 0;
+  let cumulativeShare = 0;
+  
+  stagesData.forEach(st => {
+    if (st.remPages === 0) {
+      html += `<li style="margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;">
+        <span style="color:${st.color}; font-weight:bold;">${st.label}</span>
+        <span style="color:var(--text-dim); font-size:11px;">完了</span>
+      </li>`;
+      return;
+    }
+    
+    cumulativeShare += (st.remWt / remTotalWt);
+    let targetEnd = Math.round(cumulativeShare * validDates.length) - 1;
+    let endIdx = Math.max(currentIdx, targetEnd);
+    if (endIdx >= validDates.length) endIdx = validDates.length - 1;
+    
+    if (currentIdx >= validDates.length) {
+      currentIdx = validDates.length - 1;
+      endIdx = validDates.length - 1;
+    }
+    
+    let allocatedDates = validDates.slice(currentIdx, endIdx + 1);
+    let daysCount = allocatedDates.length;
+    let pace = (st.remPages / daysCount).toFixed(2);
+    
+    let d1 = allocatedDates[0];
+    let d2 = allocatedDates[allocatedDates.length - 1];
+    let fmt = d => `${d.getMonth()+1}/${String(d.getDate()).padStart(2,'0')}`;
+    let dateStr = `${fmt(d1)}～${fmt(d2)}`;
+    
+    html += `<li style="margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;">
+        <span style="color:${st.color}; font-weight:bold;">${st.label}</span>
+        <span style="color:var(--text-main); font-weight:500;">${dateStr} <span style="color:var(--text-dim); font-size:10px;">(${pace}P/日)</span></span>
+      </li>`;
+      
+    currentIdx = endIdx + 1;
+  });
+  
+  html += '</ul>';
+  scheduleEl.innerHTML = html;
 }
 
 // --- CALENDAR & TODO ---
