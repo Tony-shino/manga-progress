@@ -493,6 +493,9 @@ function loadState() {
       });
     });
   }
+  if (d) {
+    d.level = getLevel(d.xp);
+  }
   return d;
 }
 
