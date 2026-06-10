@@ -450,6 +450,17 @@ const STEPS = ['name', 'draft', 'pen', 'finish'];
 const MANGA_WEIGHTS = { name: 0.25, draft: 1, pen: 1, finish: 0.5 };
 const XP_THRESHOLDS = [0,100,220,360,520,700,900,1120,1360,1620,1900];
 
+function getXpThreshold(lv) {
+  if (lv <= 11) {
+    return XP_THRESHOLDS[lv - 1];
+  }
+  let threshold = 1900;
+  for (let l = 12; l <= lv; l++) {
+    threshold += 300 + (l - 12) * 20;
+  }
+  return threshold;
+}
+
 function getTodayStr() { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
 
 // --- STATE MANAGEMENT ---
@@ -730,7 +741,13 @@ function showXpPopup(text) {
   void el.offsetWidth;
   el.classList.add('show');
 }
-function getLevel(xp) { let lv=1; for(let i=XP_THRESHOLDS.length-1; i>=0; i--){ if(xp>=XP_THRESHOLDS[i]){ lv=i+1; break; } } return lv; }
+function getLevel(xp) {
+  let lv = 1;
+  while (xp >= getXpThreshold(lv + 1)) {
+    lv++;
+  }
+  return lv;
+}
 function addXp(amount, label) {
   const prevLevel = getLevel(state.xp);
   state.xp += amount;
@@ -750,7 +767,8 @@ function addXp(amount, label) {
 }
 function renderStatus() {
   const lv = state.level;
-  const base = XP_THRESHOLDS[lv-1]||0; const next = XP_THRESHOLDS[lv]||(base+200);
+  const base = getXpThreshold(lv);
+  const next = getXpThreshold(lv + 1);
   const cur = state.xp - base, max = next - base;
   document.getElementById('levelNum').textContent = lv;
   document.getElementById('xpText').textContent = `${cur} / ${max}`;
